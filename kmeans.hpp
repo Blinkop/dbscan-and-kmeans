@@ -3,56 +3,29 @@
 
 #include <random>
 #include <cstdint>
+#include <limits>
 #include <cmath>
+#include <cstring>
 
 #include <iostream>
-using namespace std;
+
+#include <omp.h>
+
+#include "dataframe.hpp"
+
+using std::uint32_t;
+using dataframe::Point;
 
 namespace clustering
 {
-    template <typename T>
-    struct Point
-    {
-    public:
-        Point() { }
-        Point(uint32_t n_dims) : _ndims(n_dims) { _data = new T[n_dims]; }
-        ~Point() { if (_data) { delete[] _data; data = nullptr; }}
-
-        T& operator[](int i) { return _data[i]; }
-        Point<T>& operator+=(const Point<T>& rhs)
-        {
-            for (uint32_t i = 0; i < _ndims; i++)
-                _data[i] += rhs._data[i];
-
-            return *this;
-        }
-        Point<T>& operator/=(T rhs)
-        {
-            for (uint32_t i = 0; i < _ndims; i++)
-                _data[i] = rhs._data[i] / rhs;
-
-            return *this;
-        }
-
-        double euclidean_distance(const Point<T>& point)
-        {
-            T accum = 0.0;
-            for (uint32_t i = 0; i < _ndims; i++)
-                accum += (point._data[i] - _data[i]) * (point._data[i] - _data[i]);
-
-            return std::sqrt(accum);
-        }
-    private:
-        T* _data = nullptr;
-        uint32_t _ndims = 0;
-    };
-
     template <typename T>
     void kmenas(Point<T> data[],
                 uint32_t num_observations,
                 uint32_t num_features,
                 uint32_t num_clusters,
-                uint32_t num_threads,
+                uint32_t num_jobs,
+                uint32_t max_iter = 0,
+                bool verbose = false,
                 uint32_t seed = 1337)
     {
         if (num_observations < num_clusters)
@@ -86,15 +59,20 @@ namespace clustering
                 centroids[i][j] = data[indexes[i]][j];
         }
 
-        uint32_t num_relations_changed = 1;
-
-        while (true)
+        for (uint32_t iteration = 0; iteration < max_iter || !max_iter; iteration++)
         {
+            uint32_t num_relations_changed = 0;
+
             // get closest centroid for each observation
+            #pragma omp parallel for default(none)\
+                    shared(relations, data, centroids, num_observations, num_clusters)\
+                    schedule(static)\
+                    num_threads(num_jobs)\
+                    reduction(+:num_relations_changed)
             for (uint32_t i = 0; i < num_observations; i++)
             {
                 uint32_t index = 0;
-                T min = ~0;
+                T min = std::numeric_limits<T>::max();
                 for (uint32_t j = 0; j < num_clusters; j++)
                 {
                     auto dist = data[i].euclidean_distance(centroids[j]);
@@ -112,10 +90,20 @@ namespace clustering
                 }
             }
 
+            if (verbose)
+            {
+                std::cout << "Iteration: " << iteration << std::endl;
+                std::cout << "Relations changed:  " << num_relations_changed << std::endl;
+            }
+
             if (!num_relations_changed)
                 break;
 
             // updating centroids position
+            #pragma omp parallel for default(none)\
+                    shared(relations, data, centroids, total_obs, num_observations, num_clusters, num_features)\
+                    schedule(dynamic)\
+                    num_threads(num_jobs)
             for (uint32_t i = 0; i < num_clusters; i++)
             {
                 Point<T> accum(num_features);
